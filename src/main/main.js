@@ -8,13 +8,16 @@ function getWorkspaceFilePath() {
 	return path.join(app.getPath('userData'), 'workspace.json');
 }
 
+let mainWindow = null;
+let cleanupScriptLibraryWindow = null;
+
 function sanitizeFileNamePart(value, fallback = 'untitled') {
 	const normalized = normalizeCellValue(value).trim().replace(/[<>:"/\\|?*\x00-\x1F]+/g, '-');
 	return normalized || fallback;
 }
 
 function createWindow() {
-	const window = new BrowserWindow({
+	mainWindow = new BrowserWindow({
 		width: 1480,
 		height: 960,
 		minWidth: 1180,
@@ -27,7 +30,53 @@ function createWindow() {
 		},
 	});
 
-	window.loadFile(path.join(__dirname, '../renderer/index.html'));
+	mainWindow.on('closed', () => {
+		mainWindow = null;
+		if (cleanupScriptLibraryWindow && !cleanupScriptLibraryWindow.isDestroyed()) {
+			cleanupScriptLibraryWindow.close();
+		}
+	});
+
+	mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+}
+
+function createCleanupScriptLibraryWindow() {
+	if (cleanupScriptLibraryWindow && !cleanupScriptLibraryWindow.isDestroyed()) {
+		cleanupScriptLibraryWindow.focus();
+		return cleanupScriptLibraryWindow;
+	}
+
+	cleanupScriptLibraryWindow = new BrowserWindow({
+		width: 620,
+		height: 760,
+		minWidth: 520,
+		minHeight: 620,
+		title: '清洗腳本庫',
+		backgroundColor: '#efe4d4',
+		parent: mainWindow || undefined,
+		webPreferences: {
+			preload: path.join(__dirname, 'preload.js'),
+			contextIsolation: true,
+			nodeIntegration: false,
+		},
+	});
+
+	cleanupScriptLibraryWindow.on('closed', () => {
+		cleanupScriptLibraryWindow = null;
+	});
+
+	cleanupScriptLibraryWindow.loadFile(path.join(__dirname, '../renderer/cleanup-scripts.html'));
+	return cleanupScriptLibraryWindow;
+}
+
+function broadcastCleanupScriptsUpdated() {
+	if (mainWindow && !mainWindow.isDestroyed()) {
+		mainWindow.webContents.send('cleanupScripts:updated');
+	}
+
+	if (cleanupScriptLibraryWindow && !cleanupScriptLibraryWindow.isDestroyed()) {
+		cleanupScriptLibraryWindow.webContents.send('cleanupScripts:updated');
+	}
 }
 
 function normalizeCellValue(value) {
@@ -99,6 +148,19 @@ function workbookFileToDatasets(filePath) {
 			importedAt: new Date().toISOString(),
 		};
 	});
+}
+
+function isSupportedImportFile(filePath) {
+	const extension = path.extname(filePath || '').toLowerCase();
+	return ['.xlsx', '.xls', '.xlsm', '.csv'].includes(extension);
+}
+
+function importFilesFromPaths(filePaths = []) {
+	const normalizedPaths = Array.isArray(filePaths)
+		? filePaths.filter((filePath) => typeof filePath === 'string' && filePath.trim() !== '')
+		: [];
+	const supportedPaths = normalizedPaths.filter(isSupportedImportFile);
+	return supportedPaths.flatMap(workbookFileToDatasets);
 }
 
 function safeString(value) {
@@ -395,6 +457,15 @@ ipcMain.handle('dialog:openExcelFiles', async () => {
 	return result.filePaths.flatMap(workbookFileToDatasets);
 });
 
+ipcMain.handle('dialog:importFilesByPath', async (_event, filePaths) => {
+	try {
+		return importFilesFromPaths(filePaths);
+	} catch (error) {
+		console.log('[dialog:importFilesByPath:error]', error.message);
+		return [];
+	}
+});
+
 ipcMain.handle('workspace:load', async () => loadWorkspaceFromDisk());
 
 ipcMain.handle('workspace:save', async (_event, workspace) => {
@@ -408,6 +479,29 @@ ipcMain.handle('workspace:save', async (_event, workspace) => {
 			error: error.message,
 		};
 	}
+});
+
+ipcMain.handle('cleanupScripts:openWindow', async () => {
+	createCleanupScriptLibraryWindow();
+	return { ok: true };
+});
+
+ipcMain.handle('cleanupScripts:applyToMain', async (_event, scriptId) => {
+	if (!mainWindow || mainWindow.isDestroyed()) {
+		return { ok: false, error: '主視窗不存在' };
+	}
+
+	mainWindow.webContents.send('cleanupScripts:applyRequest', scriptId);
+	if (mainWindow.isMinimized()) {
+		mainWindow.restore();
+	}
+	mainWindow.focus();
+	return { ok: true };
+});
+
+ipcMain.handle('cleanupScripts:notifyUpdated', async () => {
+	broadcastCleanupScriptsUpdated();
+	return { ok: true };
 });
 
 ipcMain.handle('dataset:export', async (_event, dataset) => {

@@ -5,6 +5,7 @@ const state = {
 	activeDatasetId: HOME_TAB_ID,
 	fileViewMode: 'list',
 	activeSidebarTool: 'cleanup',
+	cleanupScripts: [],
 	scrollPositions: {
 		sidebarTop: 0,
 		tabContentTop: 0,
@@ -17,12 +18,14 @@ const state = {
 };
 
 let composeFormatSerial = 0;
+let cleanupScriptSerial = 0;
 const workspacePersistence = {
 	isHydrating: true,
 	saveTimer: null,
 	lastSavedSnapshot: '',
 };
 const datasetHistoryState = {};
+let homeDragAbortController = null;
 
 const SYSTEM_COLUMNS = [
 	'candidate_address',
@@ -50,6 +53,8 @@ const sidebarTemplate = document.getElementById('sidebarTemplate');
 const homeSidebarTemplate = document.getElementById('homeSidebarTemplate');
 const homePanelTemplate = document.getElementById('homePanelTemplate');
 const emptyStateTemplate = document.getElementById('emptyStateTemplate');
+const textInputDialogTemplate = document.getElementById('textInputDialogTemplate');
+const confirmDialogTemplate = document.getElementById('confirmDialogTemplate');
 
 function escapeHtml(value) {
 	return String(value)
@@ -72,6 +77,119 @@ function safeString(value) {
 	return value === undefined || value === null ? '' : String(value);
 }
 
+function isFileDragEvent(event) {
+	const types = Array.from(event.dataTransfer?.types || []);
+	return types.includes('Files');
+}
+
+function promptForText({
+	title = '請輸入內容',
+	description = '請確認內容後送出。',
+	label = '內容',
+	defaultValue = '',
+	placeholder = '',
+	confirmText = '確認',
+	cancelText = '取消',
+} = {}) {
+	if (!textInputDialogTemplate?.content?.firstElementChild) {
+		const fallbackValue = window.prompt(title, defaultValue);
+		return Promise.resolve(fallbackValue);
+	}
+
+	return new Promise((resolve) => {
+		const dialogRoot = textInputDialogTemplate.content.firstElementChild.cloneNode(true);
+		const titleElement = dialogRoot.querySelector('.dialog-title');
+		const descriptionElement = dialogRoot.querySelector('.dialog-description');
+		const labelElement = dialogRoot.querySelector('.dialog-field-label');
+		const inputElement = dialogRoot.querySelector('.dialog-input');
+		const cancelButton = dialogRoot.querySelector('.dialog-cancel-button');
+		const confirmButton = dialogRoot.querySelector('.dialog-confirm-button');
+
+		titleElement.textContent = title;
+		descriptionElement.textContent = description;
+		labelElement.textContent = label;
+		inputElement.value = defaultValue;
+		inputElement.placeholder = placeholder;
+		cancelButton.textContent = cancelText;
+		confirmButton.textContent = confirmText;
+
+		const cleanup = (result) => {
+			dialogRoot.remove();
+			resolve(result);
+		};
+
+		cancelButton.addEventListener('click', () => cleanup(null));
+		confirmButton.addEventListener('click', () => cleanup(inputElement.value));
+		dialogRoot.addEventListener('click', (event) => {
+			if (event.target === dialogRoot) {
+				cleanup(null);
+			}
+		});
+		inputElement.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter') {
+				event.preventDefault();
+				cleanup(inputElement.value);
+				return;
+			}
+
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				cleanup(null);
+			}
+		});
+
+		document.body.appendChild(dialogRoot);
+		inputElement.focus();
+		inputElement.select();
+	});
+}
+
+function confirmAction({
+	title = '請再次確認',
+	description = '這個操作需要你的確認。',
+	confirmText = '確認',
+	cancelText = '取消',
+} = {}) {
+	if (!confirmDialogTemplate?.content?.firstElementChild) {
+		return Promise.resolve(window.confirm(description));
+	}
+
+	return new Promise((resolve) => {
+		const dialogRoot = confirmDialogTemplate.content.firstElementChild.cloneNode(true);
+		const titleElement = dialogRoot.querySelector('.dialog-title');
+		const descriptionElement = dialogRoot.querySelector('.dialog-description');
+		const cancelButton = dialogRoot.querySelector('.dialog-cancel-button');
+		const confirmButton = dialogRoot.querySelector('.dialog-confirm-button');
+
+		titleElement.textContent = title;
+		descriptionElement.textContent = description;
+		cancelButton.textContent = cancelText;
+		confirmButton.textContent = confirmText;
+
+		const cleanup = (result) => {
+			dialogRoot.remove();
+			resolve(result);
+		};
+
+		cancelButton.addEventListener('click', () => cleanup(false));
+		confirmButton.addEventListener('click', () => cleanup(true));
+		dialogRoot.addEventListener('click', (event) => {
+			if (event.target === dialogRoot) {
+				cleanup(false);
+			}
+		});
+		dialogRoot.addEventListener('keydown', (event) => {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				cleanup(false);
+			}
+		});
+
+		document.body.appendChild(dialogRoot);
+		confirmButton.focus();
+	});
+}
+
 function safeComposeFormatId(value) {
 	const normalized = safeString(value).trim();
 	if (normalized) {
@@ -91,6 +209,111 @@ function createComposeFormat(name, segments = []) {
 			value: safeString(segment?.value),
 		})) : [],
 	};
+}
+
+function safeCleanupScriptId(value) {
+	const normalized = safeString(value).trim();
+	if (normalized) {
+		return normalized;
+	}
+
+	cleanupScriptSerial += 1;
+	return `cleanup-script-${Date.now()}-${cleanupScriptSerial}`;
+}
+
+function cloneCleanupOptions(options = {}) {
+	return {
+		trim: options.trim !== undefined ? Boolean(options.trim) : true,
+		collapseSpace: options.collapseSpace !== undefined ? Boolean(options.collapseSpace) : true,
+		fullwidthSpace: options.fullwidthSpace !== undefined ? Boolean(options.fullwidthSpace) : true,
+		fullwidthChar: Boolean(options.fullwidthChar),
+		removeLinebreak: Boolean(options.removeLinebreak),
+	};
+}
+
+function cloneCleanupRegexRules(regexRules = []) {
+	return Array.isArray(regexRules)
+		? regexRules.map((rule) => ({
+			pattern: safeString(rule?.pattern),
+			flags: safeString(rule?.flags),
+			replacement: safeString(rule?.replacement),
+		}))
+		: [];
+}
+
+function createCleanupScript(name, config = {}) {
+	const now = new Date().toISOString();
+	return {
+		id: safeCleanupScriptId(config.id),
+		name: safeString(name).trim() || '未命名腳本',
+		cleanupOptions: cloneCleanupOptions(config.cleanupOptions),
+		cleanupRegexRules: cloneCleanupRegexRules(config.cleanupRegexRules),
+		createdAt: config.createdAt || now,
+		updatedAt: config.updatedAt || now,
+	};
+}
+
+function normalizeCleanupScripts(scripts) {
+	if (!Array.isArray(scripts)) {
+		return [];
+	}
+
+	return scripts.map((script, index) => createCleanupScript(
+		script?.name || `清洗腳本 ${index + 1}`,
+		script,
+	));
+}
+
+function getCleanupScriptById(scriptId) {
+	return state.cleanupScripts.find((script) => script.id === scriptId);
+}
+
+function getCleanupFlowConfig(dataset, sidebarRoot) {
+	const trimCheckbox = sidebarRoot?.querySelector('.cleanup-trim');
+	const collapseSpaceCheckbox = sidebarRoot?.querySelector('.cleanup-collapse-space');
+	const fullwidthSpaceCheckbox = sidebarRoot?.querySelector('.cleanup-fullwidth-space');
+	const fullwidthCharCheckbox = sidebarRoot?.querySelector('.cleanup-fullwidth-char');
+	const removeLinebreakCheckbox = sidebarRoot?.querySelector('.cleanup-remove-linebreak');
+
+	return {
+		cleanupOptions: cloneCleanupOptions({
+			trim: trimCheckbox ? trimCheckbox.checked : dataset.cleanupOptions.trim,
+			collapseSpace: collapseSpaceCheckbox ? collapseSpaceCheckbox.checked : dataset.cleanupOptions.collapseSpace,
+			fullwidthSpace: fullwidthSpaceCheckbox ? fullwidthSpaceCheckbox.checked : dataset.cleanupOptions.fullwidthSpace,
+			fullwidthChar: fullwidthCharCheckbox ? fullwidthCharCheckbox.checked : dataset.cleanupOptions.fullwidthChar,
+			removeLinebreak: removeLinebreakCheckbox ? removeLinebreakCheckbox.checked : dataset.cleanupOptions.removeLinebreak,
+		}),
+		cleanupRegexRules: cloneCleanupRegexRules(dataset.cleanupRegexRules),
+	};
+}
+
+function saveCleanupScript(name, config) {
+	const normalizedName = safeString(name).trim();
+	if (!normalizedName) {
+		return { ok: false, reason: 'empty-name' };
+	}
+
+	const existing = state.cleanupScripts.find((script) => script.name === normalizedName);
+	const now = new Date().toISOString();
+	const nextScript = createCleanupScript(normalizedName, config);
+
+	if (existing) {
+		existing.cleanupOptions = nextScript.cleanupOptions;
+		existing.cleanupRegexRules = nextScript.cleanupRegexRules;
+		existing.updatedAt = now;
+		return { ok: true, script: existing, replaced: true };
+	}
+
+	nextScript.createdAt = now;
+	nextScript.updatedAt = now;
+	state.cleanupScripts.unshift(nextScript);
+	return { ok: true, script: nextScript, replaced: false };
+}
+
+function applyCleanupScriptToDataset(dataset, script) {
+	ensureCleanupState(dataset);
+	dataset.cleanupOptions = cloneCleanupOptions(script.cleanupOptions);
+	dataset.cleanupRegexRules = cloneCleanupRegexRules(script.cleanupRegexRules);
 }
 
 function ensureSystemColumns(dataset) {
@@ -428,15 +651,17 @@ async function saveCurrentDataset(datasetId) {
 	const history = ensureDatasetHistory(dataset);
 	history.savedSnapshot = getDatasetHistorySnapshot(dataset);
 	history.presentSnapshot = history.savedSnapshot;
+	window.alert(`已儲存「${formatDatasetLabel(dataset)}」`);
 	render();
 }
 
 function serializeWorkspaceState() {
 	return {
-		version: 1,
+		version: 2,
 		activeDatasetId: state.activeDatasetId,
 		fileViewMode: state.fileViewMode,
 		activeSidebarTool: state.activeSidebarTool,
+		cleanupScripts: state.cleanupScripts.map((script) => createCleanupScript(script.name, script)),
 		datasets: state.datasets.map(createSerializableDataset),
 	};
 }
@@ -462,6 +687,7 @@ function normalizeLoadedWorkspace(workspace) {
 		activeDatasetId: workspace.activeDatasetId || HOME_TAB_ID,
 		fileViewMode: workspace.fileViewMode === 'grid' ? 'grid' : 'list',
 		activeSidebarTool: workspace.activeSidebarTool || 'cleanup',
+		cleanupScripts: normalizeCleanupScripts(workspace.cleanupScripts),
 		datasets,
 	};
 }
@@ -1468,16 +1694,99 @@ function renderHomeSidebar() {
 }
 
 function renderHomePanel() {
+	if (homeDragAbortController) {
+		homeDragAbortController.abort();
+	}
+
+	homeDragAbortController = new AbortController();
+	const { signal } = homeDragAbortController;
 	const panel = homePanelTemplate.content.firstElementChild.cloneNode(true);
 	const fileList = panel.querySelector('#fileList');
 	const fileCountBadge = panel.querySelector('#fileCountBadge');
 	const summary = panel.querySelector('.home-summary');
 	const viewButtons = panel.querySelectorAll('.view-mode-button');
 	const homeImportButton = panel.querySelector('.home-import-button');
+	const homeDropzone = panel.querySelector('.home-dropzone');
+	const homeDropCard = panel.querySelector('.file-center-card');
+	let dragDepth = 0;
+	let isHandlingDrop = false;
+
+	function setHomeDropzoneActive(isActive) {
+		homeDropzone.classList.toggle('is-drag-over', isActive);
+	}
+
+	function extractDroppedFilePaths(event) {
+		const files = Array.from(event.dataTransfer?.files || []);
+		return files
+			.map((file) => window.desktopApi.getPathForFile(file))
+			.filter((filePath) => typeof filePath === 'string' && filePath.trim() !== '');
+	}
 
 	fileCountBadge.textContent = String(state.datasets.length);
 	summary.textContent = `${state.datasets.length} 份資料表`;
 	homeImportButton.addEventListener('click', importFiles);
+
+	const handleDragEnter = (event) => {
+		if (!isFileDragEvent(event)) {
+			return;
+		}
+
+		event.preventDefault();
+		dragDepth += 1;
+		setHomeDropzoneActive(true);
+	};
+
+	const handleDragOver = (event) => {
+		if (!isFileDragEvent(event)) {
+			return;
+		}
+
+		event.preventDefault();
+		if (event.dataTransfer) {
+			event.dataTransfer.dropEffect = 'copy';
+		}
+		setHomeDropzoneActive(true);
+	};
+
+	const handleDragLeave = (event) => {
+		if (!isFileDragEvent(event)) {
+			return;
+		}
+
+		event.preventDefault();
+		dragDepth = Math.max(0, dragDepth - 1);
+		if (dragDepth === 0 || event.target === homeDropzone || event.target === homeDropCard) {
+			setHomeDropzoneActive(false);
+		}
+	};
+
+	const handleDrop = async (event) => {
+		if (!isFileDragEvent(event)) {
+			return;
+		}
+
+		event.preventDefault();
+		event.stopPropagation();
+		if (isHandlingDrop) {
+			return;
+		}
+
+		isHandlingDrop = true;
+		dragDepth = 0;
+		setHomeDropzoneActive(false);
+		try {
+			await importFilesFromDrop(extractDroppedFilePaths(event));
+		} finally {
+			isHandlingDrop = false;
+		}
+	};
+
+	for (const target of [window, homeDropCard, homeDropzone]) {
+		target.addEventListener('dragenter', handleDragEnter, { signal });
+		target.addEventListener('dragover', handleDragOver, { signal });
+		target.addEventListener('dragleave', handleDragLeave, { signal });
+		target.addEventListener('drop', handleDrop, { signal });
+	}
 
 	for (const button of viewButtons) {
 		button.classList.toggle('active', button.dataset.viewMode === state.fileViewMode);
@@ -1562,6 +1871,11 @@ function renderHomePanel() {
 }
 
 function renderEmptyWorkspace() {
+	if (homeDragAbortController) {
+		homeDragAbortController.abort();
+		homeDragAbortController = null;
+	}
+
 	sidebarPanel.innerHTML = `
 		<div class="sidebar-stack">
 			<div>
@@ -1614,6 +1928,8 @@ function renderSidebar(dataset, tableElement) {
 	const toolTabButtons = sidebarRoot.querySelectorAll('.tool-tab-button');
 	const toolPanels = sidebarRoot.querySelectorAll('.tool-panel');
 	const selectionSummary = sidebarRoot.querySelector('.selection-summary');
+	const saveCleanupScriptButton = sidebarRoot.querySelector('.save-cleanup-script');
+	const toggleCleanupLibraryButton = sidebarRoot.querySelector('.toggle-cleanup-library');
 	const regexRuleList = sidebarRoot.querySelector('.regex-rule-list');
 	const addRegexRuleButton = sidebarRoot.querySelector('.add-regex-rule');
 	let draggingToken = null;
@@ -1696,6 +2012,60 @@ function renderSidebar(dataset, tableElement) {
 	for (const panel of toolPanels) {
 		panel.classList.toggle('hidden', panel.dataset.toolPanel !== state.activeSidebarTool);
 	}
+
+	toggleCleanupLibraryButton.addEventListener('click', async () => {
+		const result = await window.desktopApi.openCleanupScriptLibrary();
+		if (!result?.ok) {
+			window.alert(`無法開啟腳本庫：${result?.error || '未知錯誤'}`);
+		}
+	});
+
+	saveCleanupScriptButton.addEventListener('click', async () => {
+		const persistAndRefresh = async () => {
+			const result = await window.desktopApi.saveWorkspace(serializeWorkspaceState());
+			if (!result?.ok) {
+				window.alert(`儲存腳本失敗：${result?.error || '未知錯誤'}`);
+				return false;
+			}
+
+			workspacePersistence.lastSavedSnapshot = JSON.stringify(serializeWorkspaceState());
+			await window.desktopApi.notifyCleanupScriptsUpdated();
+			return true;
+		};
+
+		const currentConfig = getCleanupFlowConfig(dataset, sidebarRoot);
+		const proposedName = `清洗腳本 ${state.cleanupScripts.length + 1}`;
+		const scriptName = await promptForText({
+			title: '儲存清洗腳本',
+			description: '這個腳本只會保存清洗規則與正則設定，不會保存欄位勾選。',
+			label: '腳本名稱',
+			defaultValue: proposedName,
+			placeholder: '例如：地址標準化',
+			confirmText: '儲存腳本',
+		});
+		if (scriptName === null) {
+			return;
+		}
+
+		const existing = state.cleanupScripts.find((script) => script.name === scriptName.trim());
+		if (existing) {
+			const confirmed = window.confirm(`「${existing.name}」已存在，要用目前流程覆蓋嗎？`);
+			if (!confirmed) {
+				return;
+			}
+		}
+
+		const result = saveCleanupScript(scriptName, currentConfig);
+		if (!result.ok) {
+			window.alert('腳本名稱不能是空白。');
+			return;
+		}
+
+		const saved = await persistAndRefresh();
+		if (saved) {
+			render();
+		}
+	});
 
 	function refreshComposeTokenIndices() {
 		for (const [index, token] of Array.from(composeSegmentList.querySelectorAll('.compose-token-button')).entries()) {
@@ -2077,6 +2447,11 @@ function renderSidebar(dataset, tableElement) {
 }
 
 function renderDatasetPanel(dataset) {
+	if (homeDragAbortController) {
+		homeDragAbortController.abort();
+		homeDragAbortController = null;
+	}
+
 	const panel = tabPanelTemplate.content.firstElementChild.cloneNode(true);
 	const tableElement = panel.querySelector('.dataset-table');
 	const summary = panel.querySelector('.dataset-summary');
@@ -2196,6 +2571,29 @@ async function importFiles() {
 	render();
 }
 
+async function importFilesFromDrop(filePaths) {
+	const normalizedPaths = Array.isArray(filePaths)
+		? filePaths.filter((filePath) => typeof filePath === 'string' && filePath.trim() !== '')
+		: [];
+	if (normalizedPaths.length === 0) {
+		return;
+	}
+
+	const imported = await window.desktopApi.importFilesByPath(normalizedPaths);
+	if (!imported || imported.length === 0) {
+		window.alert('沒有可匯入的 Excel 或 CSV 檔案。');
+		return;
+	}
+
+	for (const dataset of imported) {
+		ensureSystemColumns(dataset);
+		initializeDatasetHistory(dataset);
+	}
+
+	state.datasets.push(...imported);
+	render();
+}
+
 exportDatasetButton.addEventListener('click', async () => {
 	const dataset = getDatasetById(state.activeDatasetId);
 	if (!dataset) {
@@ -2209,6 +2607,20 @@ exportDatasetButton.addEventListener('click', async () => {
 });
 
 saveDatasetButton.addEventListener('click', async () => {
+	const dataset = getDatasetById(state.activeDatasetId);
+	if (!dataset) {
+		return;
+	}
+
+	const confirmed = await confirmAction({
+		title: '確認存檔',
+		description: `確定要儲存目前分頁「${formatDatasetLabel(dataset)}」的變更嗎？`,
+		confirmText: '確認存檔',
+	});
+	if (!confirmed) {
+		return;
+	}
+
 	await saveCurrentDataset(state.activeDatasetId);
 });
 
@@ -2220,12 +2632,44 @@ redoDatasetButton.addEventListener('click', () => {
 	redoDataset(state.activeDatasetId);
 });
 
+window.desktopApi.onCleanupScriptApplyRequest((scriptId) => {
+	const dataset = getDatasetById(state.activeDatasetId);
+	if (!dataset) {
+		window.alert('請先切換到一個資料分頁，再調用清洗腳本。');
+		return;
+	}
+
+	const script = getCleanupScriptById(scriptId);
+	if (!script) {
+		window.alert('找不到指定的清洗腳本。');
+		return;
+	}
+
+	recordDatasetUndoPoint(dataset);
+	applyCleanupScriptToDataset(dataset, script);
+	finalizeDatasetHistory(dataset);
+	render();
+});
+
+window.desktopApi.onCleanupScriptsUpdated(async () => {
+	const workspace = await window.desktopApi.loadWorkspace();
+	if (!workspace || typeof workspace !== 'object') {
+		state.cleanupScripts = [];
+		render();
+		return;
+	}
+
+	state.cleanupScripts = normalizeCleanupScripts(workspace.cleanupScripts);
+	render();
+});
+
 async function hydrateWorkspace() {
 	const workspace = normalizeLoadedWorkspace(await window.desktopApi.loadWorkspace());
 	if (workspace) {
 		state.datasets = workspace.datasets;
 		state.fileViewMode = workspace.fileViewMode;
 		state.activeSidebarTool = workspace.activeSidebarTool;
+		state.cleanupScripts = workspace.cleanupScripts;
 		state.activeDatasetId = workspace.activeDatasetId === HOME_TAB_ID
 			? HOME_TAB_ID
 			: workspace.datasets.some((dataset) => dataset.id === workspace.activeDatasetId)
@@ -2234,6 +2678,7 @@ async function hydrateWorkspace() {
 					? workspace.datasets[0].id
 					: HOME_TAB_ID;
 	} else {
+		state.cleanupScripts = [];
 		state.activeDatasetId = HOME_TAB_ID;
 	}
 

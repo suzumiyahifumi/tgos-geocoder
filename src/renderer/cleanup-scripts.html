@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>清洗腳本庫</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="./styles.css">
+</head>
+<body class="cleanup-library-page">
+	<div class="cleanup-library-shell">
+		<header class="cleanup-library-hero">
+			<div>
+				<p class="eyebrow">Cleanup Scripts</p>
+				<h1>清洗腳本庫</h1>
+				<p class="cleanup-library-copy">集中管理欄位清洗腳本，並把腳本調用到目前主視窗中的資料分頁。</p>
+			</div>
+			<div class="cleanup-library-badge" id="scriptCount">0 筆腳本</div>
+		</header>
+		<main class="cleanup-library-main">
+			<section class="cleanup-library-panel">
+				<div class="cleanup-library-list" id="scriptList"></div>
+			</section>
+		</main>
+	</div>
+	<template id="libraryTextInputDialogTemplate">
+		<div class="dialog-backdrop">
+			<div class="dialog-card">
+				<div class="dialog-copy">
+					<p class="eyebrow dialog-eyebrow">Input</p>
+					<h2 class="dialog-title">請輸入內容</h2>
+					<p class="dialog-description">請確認內容後送出。</p>
+				</div>
+				<label class="field">
+					<span class="dialog-field-label">內容</span>
+					<input type="text" class="dialog-input">
+				</label>
+				<div class="dialog-actions">
+					<button class="mini-button dialog-cancel-button" type="button">取消</button>
+					<button class="secondary-button dialog-confirm-button" type="button">確認</button>
+				</div>
+			</div>
+		</div>
+	</template>
+	<template id="libraryConfirmDialogTemplate">
+		<div class="dialog-backdrop">
+			<div class="dialog-card">
+				<div class="dialog-copy">
+					<p class="eyebrow dialog-eyebrow">Confirm</p>
+					<h2 class="dialog-title">請再次確認</h2>
+					<p class="dialog-description">這個操作需要你的確認。</p>
+				</div>
+				<div class="dialog-actions">
+					<button class="mini-button dialog-cancel-button" type="button">取消</button>
+					<button class="secondary-button dialog-confirm-button" type="button">確認</button>
+				</div>
+			</div>
+		</div>
+	</template>
+	<script src="./cleanup-scripts.js"></script>
+</body>
+</html>

@@ -87,7 +87,7 @@
 					</div>
 					<span id="fileCountBadge" class="badge">0</span>
 				</div>
-				<div class="file-browser-wrap">
+				<div class="file-browser-wrap home-dropzone">
 					<div id="fileList" class="file-browser empty-state">
 						尚未匯入任何檔案
 					</div>
@@ -101,6 +101,26 @@
 			<p class="eyebrow">Workspace</p>
 			<h2>先匯入資料表</h2>
 			<p>匯入 Excel 或 CSV 後，右側會固定顯示目前分頁的資料表，左側則提供該分頁的所有操作設定。</p>
+		</div>
+	</template>
+
+	<template id="textInputDialogTemplate">
+		<div class="dialog-backdrop">
+			<div class="dialog-card">
+				<div class="dialog-copy">
+					<p class="eyebrow dialog-eyebrow">Input</p>
+					<h2 class="dialog-title">請輸入內容</h2>
+					<p class="dialog-description">請確認內容後送出。</p>
+				</div>
+				<label class="field">
+					<span class="dialog-field-label">內容</span>
+					<input type="text" class="dialog-input">
+				</label>
+				<div class="dialog-actions">
+					<button class="mini-button dialog-cancel-button" type="button">取消</button>
+					<button class="secondary-button dialog-confirm-button" type="button">確認</button>
+				</div>
+			</div>
 		</div>
 	</template>
 
@@ -124,6 +144,10 @@
 					<span class="muted-note">從右側表頭勾選欄位</span>
 				</div>
 				<div class="selection-summary">尚未選取欄位</div>
+				<div class="cleanup-script-toolbar">
+					<button class="mini-button save-cleanup-script" type="button">儲存為腳本</button>
+					<button class="mini-button toggle-cleanup-library" type="button">開啟腳本庫</button>
+				</div>
 				<div class="checkbox-group">
 					<label><input type="checkbox" class="cleanup-trim" checked> 去除前後空白</label>
 					<label><input type="checkbox" class="cleanup-collapse-space" checked> 連續空白壓成單一空白</label>
