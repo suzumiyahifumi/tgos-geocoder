@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>TGOS Geocoding Workbench</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+	<div class="app-shell">
+		<aside class="sidebar">
+			<div id="sidebarPanel" class="sidebar-panel"></div>
+		</aside>
+		<main class="workspace">
+			<section id="workspaceView" class="workspace-view">
+				<div class="workspace-toolbar">
+					<span id="datasetCount" class="muted-note">尚未匯入資料表</span>
+					<div class="workspace-toolbar-actions">
+						<button id="saveDatasetButton" class="secondary-button toolbar-button" type="button" disabled>存檔</button>
+						<button id="undoDatasetButton" class="secondary-button toolbar-button" type="button" disabled>Undo</button>
+						<button id="redoDatasetButton" class="secondary-button toolbar-button" type="button" disabled>Redo</button>
+						<button id="exportDatasetButton" class="secondary-button toolbar-button" type="button" disabled>匯出</button>
+					</div>
+				</div>
+				<div id="tabs" class="tabs"></div>
+				<div id="tabContent" class="tab-content"></div>
+			</section>
+		</main>
+	</div>
+
+	<template id="homeSidebarTemplate">
+		<div class="sidebar-stack">
+			<div>
+				<p class="eyebrow">Geocoding Demo</p>
+				<h1>檔案中心</h1>
+				<p class="sidebar-copy">
+					先在檔案中心匯入、重新命名與整理資料分頁。只有進入表格分頁後，左側才會切成欄位清理、候選地址與 geocoding 的操作區。
+				</p>
+			</div>
+			<div class="panel">
+				<div class="panel-title-row">
+					<h2>工作方式</h2>
+				</div>
+				<p class="sidebar-copy compact-copy">
+					這裡是首頁，也是資料分頁的管理頁。你可以調整顯示方式、重新命名分頁，或刪除已匯入的工作表。
+				</p>
+			</div>
+			<div class="panel panel-muted">
+				<h2>流程</h2>
+				<ol class="hint-list">
+					<li>匯入多份 Excel 或 CSV。</li>
+					<li>在檔案中心管理分頁。</li>
+					<li>進入資料分頁後，使用左側工具進行清理與查詢。</li>
+				</ol>
+			</div>
+		</div>
+	</template>
+
+	<template id="homePanelTemplate">
+		<div class="home-panel">
+			<section class="home-header">
+				<div class="home-intro">
+					<p class="eyebrow">File Hub</p>
+					<h2>檔案中心</h2>
+					<p>
+						匯入 Excel 後，每個工作表都會成為一個可操作分頁。先在這裡整理命名與展示方式，再切到工作分頁進行清理與 geocoding。
+					</p>
+				</div>
+				<div class="home-actions">
+					<button class="primary-button home-import-button">匯入 Excel / CSV</button>
+					<div class="home-actions-row">
+						<div class="view-switch">
+							<button class="view-mode-button active" data-view-mode="list">欄位</button>
+							<button class="view-mode-button" data-view-mode="grid">圖示</button>
+						</div>
+					</div>
+				</div>
+			</section>
+			<section class="grid-card file-center-card">
+				<div class="panel-title-row">
+					<div>
+						<h3>已匯入資料表</h3>
+						<p class="muted-note home-summary">0 份資料表</p>
+					</div>
+					<span id="fileCountBadge" class="badge">0</span>
+				</div>
+				<div class="file-browser-wrap">
+					<div id="fileList" class="file-browser empty-state">
+						尚未匯入任何檔案
+					</div>
+				</div>
+			</section>
+		</div>
+	</template>
+
+	<template id="emptyStateTemplate">
+		<div class="hero-card empty-workspace">
+			<p class="eyebrow">Workspace</p>
+			<h2>先匯入資料表</h2>
+			<p>匯入 Excel 或 CSV 後，右側會固定顯示目前分頁的資料表，左側則提供該分頁的所有操作設定。</p>
+		</div>
+	</template>
+
+	<template id="sidebarTemplate">
+		<div class="sidebar-stack">
+			<div>
+				<p class="eyebrow">Editing</p>
+				<h1>設定與操作</h1>
+				<p class="sidebar-copy">
+					目前分頁的欄位處理、候選地址組合與 geocoding 操作都集中在這裡。
+				</p>
+			</div>
+			<div class="tool-switch" role="tablist" aria-label="編輯功能">
+				<button class="tool-tab-button active" data-tool="cleanup">欄位清理</button>
+				<button class="tool-tab-button" data-tool="compose">候選地址</button>
+				<button class="tool-tab-button" data-tool="geocode">Geocoding</button>
+			</div>
+			<section class="panel tool-panel" data-tool-panel="cleanup">
+				<div class="panel-title-row">
+					<!-- <h2>欄位清理</h2> -->
+					<span class="muted-note">從右側表頭勾選欄位</span>
+				</div>
+				<div class="selection-summary">尚未選取欄位</div>
+				<div class="checkbox-group">
+					<label><input type="checkbox" class="cleanup-trim" checked> 去除前後空白</label>
+					<label><input type="checkbox" class="cleanup-collapse-space" checked> 連續空白壓成單一空白</label>
+					<label><input type="checkbox" class="cleanup-fullwidth-space" checked> 全形空白轉半形空白</label>
+					<label><input type="checkbox" class="cleanup-fullwidth-char"> 全形轉半形</label>
+					<label><input type="checkbox" class="cleanup-remove-linebreak"> 移除換行</label>
+				</div>
+				<div class="regex-rules">
+					<div class="panel-title-row">
+						<h3>正則替換</h3>
+						<button class="mini-button add-regex-rule" type="button">新增規則</button>
+					</div>
+					<div class="regex-rule-list"></div>
+				</div>
+				<button class="secondary-button apply-cleanup">套用欄位清理</button>
+			</section>
+			<section class="panel tool-panel hidden" data-tool-panel="compose">
+				<div class="panel-title-row">
+					<!-- <h2>候選地址</h2> -->
+					<span class="muted-note">建立 `candidate_address`</span>
+				</div>
+				<label class="field">
+					<span>欄位標籤</span>
+					<div class="field-tag-list compose-field-tags"></div>
+				</label>
+				<label class="field">
+					<span>候選格式</span>
+					<div class="compose-format-toolbar">
+						<div class="compose-format-list"></div>
+						<div class="compose-format-actions">
+							<button class="mini-button add-compose-format" type="button">新增備選格式</button>
+							<button class="mini-button promote-compose-format" type="button">設為主要格式</button>
+							<button class="mini-button danger-button remove-compose-format" type="button">刪除目前格式</button>
+						</div>
+					</div>
+					<div class="compose-builder">
+						<div class="compose-literal-row">
+							<input type="text" class="compose-literal-input" placeholder="追加文字或符號，例如：路、號、-、空白">
+							<button class="mini-button add-compose-literal" type="button">加入文字</button>
+						</div>
+						<div class="compose-segment-list"></div>
+					</div>
+				</label>
+				<div class="compose-preview">
+					<span>預覽結果</span>
+					<div class="compose-preview-value">尚未建立候選格式</div>
+				</div>
+				<p class="small-copy">第一組會寫入 `candidate_address`，其餘格式會在 geocoding 無結果時依序自動嘗試；一旦改用備選格式，`candidate_address` 也會同步改成該次實際查詢內容。</p>
+				<p class="small-copy">點欄位標籤可加入格式；候選格式中的所有標籤都可直接拖曳排序，點一下即可刪除。</p>
+				<button class="secondary-button compose-address">建立候選地址</button>
+			</section>
+			<section class="panel emphasis-card tool-panel hidden" data-tool-panel="geocode">
+				<div class="panel-title-row">
+					<!-- <h2>Geocoding</h2> -->
+					<span class="muted-note">每筆延遲 0.3 秒</span>
+				</div>
+				<!-- <p class="small-copy">
+					會回填 `matched_address`、`tgos_candidate_address`、`coord_x`、`coord_y`、`coord_system`、`geocode_match_type`、`geocode_result_count`、`geocode_status`。
+				</p> -->
+				<div class="checkbox-group geocode-options">
+					<label><input type="checkbox" class="geocode-force-reprocess"> 重新匹配已匹配成功地址</label>
+					<label><input type="checkbox" class="geocode-reprocess-unmatched"> 重新匹配未匹配成功地址</label>
+				</div>
+				<button class="primary-button run-geocode-all">批次處理全部</button>
+				<button class="secondary-button run-geocode-selected" type="button">批次處理勾選列</button>
+				<p class="small-copy geocode-queue-hint">待查詢筆數：0</p>
+				<div class="geocode-control-row" aria-label="查詢控制">
+					<button class="geocode-icon-button pause-geocode" type="button" aria-label="暫停查詢" title="暫停查詢">⏸</button>
+					<button class="geocode-icon-button stop-geocode" type="button" aria-label="停止查詢" title="停止查詢">⏹</button>
+				</div>
+				<div class="progress-row">
+					<div class="progress-bar">
+						<div class="progress-fill"></div>
+					</div>
+					<span class="progress-text">尚未開始</span>
+				</div>
+			</section>
+		</div>
+	</template>
+
+	<template id="tabPanelTemplate">
+		<div class="workbench">
+			<section class="grid-card table-panel">
+				<div class="panel-title-row">
+					<h3>資料預覽</h3>
+					<span class="muted-note dataset-summary"></span>
+				</div>
+				<div class="column-visibility-bar"></div>
+				<div class="table-wrap">
+					<table class="dataset-table"></table>
+				</div>
+			</section>
+		</div>
+	</template>
+
+	<script src="./app.js"></script>
+</body>
+</html>
