@@ -15,6 +15,11 @@ const state = {
 		composeScrollLeftByDataset: {},
 		tableByDataset: {},
 	},
+	mapEditorFocus: {
+		datasetId: '',
+		rowId: '',
+		timerId: 0,
+	},
 };
 
 let composeFormatSerial = 0;
@@ -520,6 +525,216 @@ function createExportPayload(dataset) {
 	};
 }
 
+function hasMapCoordinates(row) {
+	return safeString(row?.coord_x).trim() !== '' && safeString(row?.coord_y).trim() !== '';
+}
+
+function createMapEditorPayload(dataset) {
+	if (!dataset) {
+		return {
+			datasetId: '',
+			datasetLabel: '',
+			columnNames: [],
+			markers: [],
+		};
+	}
+
+	ensureRowSelectionState(dataset);
+	const selectedRowIds = new Set(dataset.selectedRowIds);
+
+	return {
+		datasetId: dataset.id,
+		datasetLabel: formatDatasetLabel(dataset),
+		columnNames: Array.isArray(dataset.columnNames) ? [...dataset.columnNames] : [],
+		markers: dataset.rows
+			.filter((row) => selectedRowIds.has(row.__rowId) && hasMapCoordinates(row))
+			.map((row) => ({
+				rowId: row.__rowId,
+				rowNumber: dataset.rows.findIndex((item) => item.__rowId === row.__rowId) + 1,
+				candidateAddress: safeString(row.candidate_address),
+				matchedAddress: safeString(row.matched_address),
+				coordX: safeString(row.coord_x),
+				coordY: safeString(row.coord_y),
+				coordSystem: safeString(row.coord_system),
+				rowData: { ...row },
+			})),
+	};
+}
+
+function syncMapEditorWindow() {
+	if (!window.desktopApi?.syncMapEditor) {
+		return Promise.resolve();
+	}
+
+	const dataset = getDatasetById(state.activeDatasetId);
+	const payload = state.activeDatasetId === HOME_TAB_ID
+		? {
+			datasetId: '',
+			datasetLabel: '',
+			columnNames: [],
+			markers: [],
+		}
+		: createMapEditorPayload(dataset);
+
+	return window.desktopApi.syncMapEditor(payload);
+}
+
+function getMapFocusedRowId(datasetId) {
+	return state.mapEditorFocus.datasetId === datasetId ? state.mapEditorFocus.rowId : '';
+}
+
+function clearMapEditorRowFocus(shouldRender = true) {
+	if (state.mapEditorFocus.timerId) {
+		window.clearTimeout(state.mapEditorFocus.timerId);
+	}
+
+	state.mapEditorFocus = {
+		datasetId: '',
+		rowId: '',
+		timerId: 0,
+	};
+
+	if (shouldRender) {
+		render();
+	}
+}
+
+function animateElementScrollTop(element, nextTop, duration = 320) {
+	if (!element) {
+		return Promise.resolve();
+	}
+
+	const startTop = element.scrollTop;
+	const delta = nextTop - startTop;
+	if (Math.abs(delta) < 1) {
+		element.scrollTop = nextTop;
+		return Promise.resolve();
+	}
+
+	const startTime = performance.now();
+
+	return new Promise((resolve) => {
+		const step = (now) => {
+			const progress = Math.min(1, (now - startTime) / duration);
+			const easedProgress = 1 - ((1 - progress) ** 3);
+			element.scrollTop = startTop + (delta * easedProgress);
+			if (progress < 1) {
+				window.requestAnimationFrame(step);
+				return;
+			}
+
+			element.scrollTop = nextTop;
+			resolve();
+		};
+
+		window.requestAnimationFrame(step);
+	});
+}
+
+function scrollToDatasetRow(datasetId, rowId) {
+	const tryScroll = () => {
+		const tableElement = getActiveDatasetTableElement(datasetId);
+		const rowElement = tableElement?.querySelector(`tr[data-row-id="${CSS.escape(rowId)}"]`);
+		const tableWrap = tableElement?.closest('.table-wrap');
+		if (!rowElement || !tableWrap) {
+			return null;
+		}
+
+		const wrapRect = tableWrap.getBoundingClientRect();
+		const rowRect = rowElement.getBoundingClientRect();
+		const targetTop = Math.max(
+			0,
+			tableWrap.scrollTop + (rowRect.top - wrapRect.top) - (tableWrap.clientHeight / 2) + (rowRect.height / 2)
+		);
+
+		return {
+			tableWrap,
+			rowElement,
+			targetTop,
+		};
+	};
+
+	return new Promise((resolve) => {
+		const result = tryScroll();
+		if (result) {
+			resolve(result);
+			return;
+		}
+
+		window.requestAnimationFrame(() => {
+			const nextResult = tryScroll();
+			if (nextResult) {
+				resolve(nextResult);
+				return;
+			}
+
+			window.requestAnimationFrame(() => {
+				const finalResult = tryScroll();
+				if (finalResult) {
+					resolve(finalResult);
+					return;
+				}
+
+				window.setTimeout(() => {
+					resolve(tryScroll());
+				}, 120);
+			});
+		});
+	});
+}
+
+async function focusDatasetRowFromMap(datasetId, rowId) {
+	if (!datasetId || !rowId) {
+		return;
+	}
+
+	if (!getDatasetById(datasetId)) {
+		return;
+	}
+
+	if (state.activeDatasetId !== datasetId) {
+		state.activeDatasetId = datasetId;
+	}
+
+	if (state.activeSidebarTool !== 'geocode') {
+		state.activeSidebarTool = 'geocode';
+	}
+
+	if (state.mapEditorFocus.timerId) {
+		window.clearTimeout(state.mapEditorFocus.timerId);
+	}
+
+	state.mapEditorFocus = {
+		datasetId: '',
+		rowId: '',
+		timerId: 0,
+	};
+
+	render();
+	const preHighlightScroll = await scrollToDatasetRow(datasetId, rowId);
+	if (preHighlightScroll?.tableWrap) {
+		await animateElementScrollTop(preHighlightScroll.tableWrap, preHighlightScroll.targetTop);
+	}
+
+	state.mapEditorFocus = {
+		datasetId,
+		rowId,
+		timerId: 0,
+	};
+
+	render();
+	const postHighlightScroll = await scrollToDatasetRow(datasetId, rowId);
+	if (postHighlightScroll?.tableWrap) {
+		await animateElementScrollTop(postHighlightScroll.tableWrap, postHighlightScroll.targetTop, 180);
+	}
+
+	state.mapEditorFocus.timerId = window.setTimeout(() => {
+		if (state.mapEditorFocus.datasetId === datasetId && state.mapEditorFocus.rowId === rowId) {
+			clearMapEditorRowFocus(true);
+		}
+	}, 2200);
+}
+
 function createDatasetHistoryPayload(dataset) {
 	const payload = createSerializableDataset(dataset);
 	delete payload.geocodeRuntime;
@@ -1023,6 +1238,7 @@ function renderTable(tableElement, dataset) {
 	const geocodeState = ensureGeocodeState(dataset);
 	const pendingRowIds = new Set(geocodeState.pendingRowIds || []);
 	const sortedRows = getSortedRows(dataset);
+	const mapFocusedRowId = getMapFocusedRowId(dataset.id);
 
 	tableElement.innerHTML = `
 		<thead>
@@ -1080,7 +1296,7 @@ function renderTable(tableElement, dataset) {
 		</thead>
 		<tbody>
 			${sortedRows.map((row) => `
-			<tr class="${selectedRowIds.has(row.__rowId) ? 'selected-row' : ''}" data-row-id="${escapeHtml(row.__rowId)}">
+			<tr class="${selectedRowIds.has(row.__rowId) ? 'selected-row' : ''}${mapFocusedRowId === row.__rowId ? ' map-focused-row' : ''}" data-row-id="${escapeHtml(row.__rowId)}">
 					<td class="row-selector-cell">
 						<button
 							class="row-selector-button ${selectedRowIds.has(row.__rowId) ? 'is-selected' : ''}"
@@ -1452,6 +1668,7 @@ function updateRenderedGeocodeState(dataset, row = null) {
 	if (row) {
 		updateRenderedGeocodeRow(row);
 	}
+	syncMapEditorWindow();
 }
 
 function sleep(ms) {
@@ -1919,6 +2136,7 @@ function renderSidebar(dataset, tableElement) {
 	const composeAddressButton = sidebarRoot.querySelector('.compose-address');
 	const runGeocodeAllButton = sidebarRoot.querySelector('.run-geocode-all');
 	const runGeocodeSelectedButton = sidebarRoot.querySelector('.run-geocode-selected');
+	const openMapEditorButton = sidebarRoot.querySelector('.open-map-editor');
 	const pauseGeocodeButton = sidebarRoot.querySelector('.pause-geocode');
 	const stopGeocodeButton = sidebarRoot.querySelector('.stop-geocode');
 	const geocodeForceReprocessCheckbox = sidebarRoot.querySelector('.geocode-force-reprocess');
@@ -1977,6 +2195,7 @@ function renderSidebar(dataset, tableElement) {
 	runGeocodeSelectedButton.textContent = geocodeState.isPaused && geocodeState.scope === 'selected' ? '繼續處理勾選列' : '批次處理勾選列';
 	runGeocodeAllButton.disabled = geocodeState.isRunning;
 	runGeocodeSelectedButton.disabled = geocodeState.isRunning || (!geocodeState.isPaused && selectedCount === 0);
+	openMapEditorButton.disabled = false;
 	pauseGeocodeButton.disabled = !geocodeState.isRunning;
 	stopGeocodeButton.disabled = !geocodeState.isRunning && !geocodeState.isPaused;
 
@@ -2434,6 +2653,20 @@ function renderSidebar(dataset, tableElement) {
 		});
 	});
 
+	openMapEditorButton.addEventListener('click', async () => {
+		const payload = createMapEditorPayload(dataset);
+		await syncMapEditorWindow();
+		const result = await window.desktopApi.openMapEditorWindow(payload);
+		if (!result?.ok) {
+			window.alert(`無法開啟地圖編輯：${result?.error || '未知錯誤'}`);
+			return;
+		}
+
+		window.setTimeout(() => {
+			syncMapEditorWindow();
+		}, 120);
+	});
+
 	pauseGeocodeButton.addEventListener('click', () => {
 		pauseGeocode(dataset.id);
 	});
@@ -2553,6 +2786,7 @@ function render() {
 	renderTabs();
 	renderActivePanel();
 	scheduleScrollRestore();
+	syncMapEditorWindow();
 	scheduleWorkspaceSave();
 }
 
@@ -2661,6 +2895,14 @@ window.desktopApi.onCleanupScriptsUpdated(async () => {
 
 	state.cleanupScripts = normalizeCleanupScripts(workspace.cleanupScripts);
 	render();
+});
+
+window.desktopApi.onMapEditorFocusRow((payload) => {
+	if (!payload || typeof payload !== 'object') {
+		return;
+	}
+
+	focusDatasetRowFromMap(payload.datasetId, payload.rowId);
 });
 
 async function hydrateWorkspace() {

@@ -10,10 +10,37 @@ function getWorkspaceFilePath() {
 
 let mainWindow = null;
 let cleanupScriptLibraryWindow = null;
+let mapEditorWindow = null;
+let latestMapEditorPayload = null;
+let hasConfiguredOsmTileHeaders = false;
 
 function sanitizeFileNamePart(value, fallback = 'untitled') {
 	const normalized = normalizeCellValue(value).trim().replace(/[<>:"/\\|?*\x00-\x1F]+/g, '-');
 	return normalized || fallback;
+}
+
+function configureOsmTileHeaders(session) {
+	if (!session || hasConfiguredOsmTileHeaders) {
+		return;
+	}
+
+	session.webRequest.onBeforeSendHeaders({
+		urls: [
+			'https://tile.openstreetmap.org/*',
+			'https://a.tile.openstreetmap.org/*',
+			'https://b.tile.openstreetmap.org/*',
+			'https://c.tile.openstreetmap.org/*',
+		],
+	}, (details, callback) => {
+		callback({
+			requestHeaders: {
+				...details.requestHeaders,
+				Referer: 'https://www.openstreetmap.org/',
+			},
+		});
+	});
+
+	hasConfiguredOsmTileHeaders = true;
 }
 
 function createWindow() {
@@ -34,6 +61,9 @@ function createWindow() {
 		mainWindow = null;
 		if (cleanupScriptLibraryWindow && !cleanupScriptLibraryWindow.isDestroyed()) {
 			cleanupScriptLibraryWindow.close();
+		}
+		if (mapEditorWindow && !mapEditorWindow.isDestroyed()) {
+			mapEditorWindow.close();
 		}
 	});
 
@@ -67,6 +97,43 @@ function createCleanupScriptLibraryWindow() {
 
 	cleanupScriptLibraryWindow.loadFile(path.join(__dirname, '../renderer/cleanup-scripts.html'));
 	return cleanupScriptLibraryWindow;
+}
+
+function createMapEditorWindow() {
+	if (mapEditorWindow && !mapEditorWindow.isDestroyed()) {
+		mapEditorWindow.focus();
+		return mapEditorWindow;
+	}
+
+	mapEditorWindow = new BrowserWindow({
+		width: 1100,
+		height: 780,
+		minWidth: 860,
+		minHeight: 620,
+		title: '地圖編輯',
+		backgroundColor: '#efe4d4',
+		parent: mainWindow || undefined,
+		webPreferences: {
+			preload: path.join(__dirname, 'preload.js'),
+			contextIsolation: true,
+			nodeIntegration: false,
+		},
+	});
+
+	configureOsmTileHeaders(mapEditorWindow.webContents.session);
+
+	mapEditorWindow.on('closed', () => {
+		mapEditorWindow = null;
+	});
+
+	mapEditorWindow.webContents.on('did-finish-load', () => {
+		if (latestMapEditorPayload && mapEditorWindow && !mapEditorWindow.isDestroyed()) {
+			mapEditorWindow.webContents.send('mapEditor:data', latestMapEditorPayload);
+		}
+	});
+
+	mapEditorWindow.loadFile(path.join(__dirname, '../renderer/map-editor.html'));
+	return mapEditorWindow;
 }
 
 function broadcastCleanupScriptsUpdated() {
@@ -501,6 +568,53 @@ ipcMain.handle('cleanupScripts:applyToMain', async (_event, scriptId) => {
 
 ipcMain.handle('cleanupScripts:notifyUpdated', async () => {
 	broadcastCleanupScriptsUpdated();
+	return { ok: true };
+});
+
+ipcMain.handle('mapEditor:openWindow', async (_event, payload) => {
+	if (payload && typeof payload === 'object') {
+		latestMapEditorPayload = payload;
+	}
+
+	createMapEditorWindow();
+	if (mapEditorWindow && !mapEditorWindow.isDestroyed()) {
+		if (mapEditorWindow.isMinimized()) {
+			mapEditorWindow.restore();
+		}
+		mapEditorWindow.focus();
+		if (latestMapEditorPayload) {
+			mapEditorWindow.webContents.send('mapEditor:data', latestMapEditorPayload);
+		}
+	}
+
+	return { ok: true };
+});
+
+ipcMain.handle('mapEditor:syncData', async (_event, payload) => {
+	latestMapEditorPayload = payload && typeof payload === 'object'
+		? payload
+		: null;
+
+	if (mapEditorWindow && !mapEditorWindow.isDestroyed()) {
+		mapEditorWindow.webContents.send('mapEditor:data', latestMapEditorPayload || {
+			datasetId: '',
+			datasetLabel: '',
+			markers: [],
+		});
+	}
+
+	return { ok: true };
+});
+
+ipcMain.handle('mapEditor:focusRow', async (_event, payload) => {
+	if (mainWindow && !mainWindow.isDestroyed()) {
+		mainWindow.webContents.send('mapEditor:focusRow', payload || null);
+		if (mainWindow.isMinimized()) {
+			mainWindow.restore();
+		}
+		mainWindow.focus();
+	}
+
 	return { ok: true };
 });
 

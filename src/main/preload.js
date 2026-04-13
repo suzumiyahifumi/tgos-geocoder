@@ -17,6 +17,9 @@ contextBridge.exposeInMainWorld('desktopApi', {
 	openCleanupScriptLibrary: () => ipcRenderer.invoke('cleanupScripts:openWindow'),
 	applyCleanupScriptFromLibrary: (scriptId) => ipcRenderer.invoke('cleanupScripts:applyToMain', scriptId),
 	notifyCleanupScriptsUpdated: () => ipcRenderer.invoke('cleanupScripts:notifyUpdated'),
+	openMapEditorWindow: (payload) => ipcRenderer.invoke('mapEditor:openWindow', payload),
+	syncMapEditor: (payload) => ipcRenderer.invoke('mapEditor:syncData', payload),
+	focusRowFromMapEditor: (payload) => ipcRenderer.invoke('mapEditor:focusRow', payload),
 	onCleanupScriptApplyRequest: (handler) => {
 		if (typeof handler !== 'function') {
 			return () => {};
@@ -37,6 +40,28 @@ contextBridge.exposeInMainWorld('desktopApi', {
 		ipcRenderer.on('cleanupScripts:updated', listener);
 		return () => {
 			ipcRenderer.removeListener('cleanupScripts:updated', listener);
+		};
+	},
+	onMapEditorData: (handler) => {
+		if (typeof handler !== 'function') {
+			return () => {};
+		}
+
+		const listener = (_event, payload) => handler(payload);
+		ipcRenderer.on('mapEditor:data', listener);
+		return () => {
+			ipcRenderer.removeListener('mapEditor:data', listener);
+		};
+	},
+	onMapEditorFocusRow: (handler) => {
+		if (typeof handler !== 'function') {
+			return () => {};
+		}
+
+		const listener = (_event, payload) => handler(payload);
+		ipcRenderer.on('mapEditor:focusRow', listener);
+		return () => {
+			ipcRenderer.removeListener('mapEditor:focusRow', listener);
 		};
 	},
 });
