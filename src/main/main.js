@@ -49,12 +49,19 @@ function createWindow() {
 		height: 960,
 		minWidth: 1180,
 		minHeight: 760,
+		show: false,
 		backgroundColor: '#efe4d4',
 		webPreferences: {
 			preload: path.join(__dirname, 'preload.js'),
 			contextIsolation: true,
 			nodeIntegration: false,
 		},
+	});
+
+	mainWindow.once('ready-to-show', () => {
+		if (mainWindow && !mainWindow.isDestroyed()) {
+			mainWindow.show();
+		}
 	});
 
 	mainWindow.on('closed', () => {
@@ -464,7 +471,7 @@ async function loadWorkspaceFromDisk() {
 async function saveWorkspaceToDisk(workspace) {
 	const filePath = getWorkspaceFilePath();
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
-	await fs.writeFile(filePath, JSON.stringify(workspace, null, 2), 'utf8');
+	await fs.writeFile(filePath, JSON.stringify(workspace), 'utf8');
 }
 
 async function exportDatasetToFile(dataset) {

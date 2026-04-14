@@ -28,9 +28,12 @@ const workspacePersistence = {
 	isHydrating: true,
 	saveTimer: null,
 	lastSavedSnapshot: '',
+	pendingStartupDatasetId: '',
 };
 const datasetHistoryState = {};
 let homeDragAbortController = null;
+let pendingMapEditorSyncTimer = 0;
+let tableRenderJobSerial = 0;
 
 const SYSTEM_COLUMNS = [
 	'candidate_address',
@@ -546,18 +549,20 @@ function createMapEditorPayload(dataset) {
 		datasetId: dataset.id,
 		datasetLabel: formatDatasetLabel(dataset),
 		columnNames: Array.isArray(dataset.columnNames) ? [...dataset.columnNames] : [],
-		markers: dataset.rows
-			.filter((row) => selectedRowIds.has(row.__rowId) && hasMapCoordinates(row))
-			.map((row) => ({
+		markers: dataset.rows.flatMap((row, index) => (
+			selectedRowIds.has(row.__rowId) && hasMapCoordinates(row)
+				? [{
 				rowId: row.__rowId,
-				rowNumber: dataset.rows.findIndex((item) => item.__rowId === row.__rowId) + 1,
+				rowNumber: index + 1,
 				candidateAddress: safeString(row.candidate_address),
 				matchedAddress: safeString(row.matched_address),
 				coordX: safeString(row.coord_x),
 				coordY: safeString(row.coord_y),
 				coordSystem: safeString(row.coord_system),
 				rowData: { ...row },
-			})),
+				}]
+				: []
+		)),
 	};
 }
 
@@ -577,6 +582,17 @@ function syncMapEditorWindow() {
 		: createMapEditorPayload(dataset);
 
 	return window.desktopApi.syncMapEditor(payload);
+}
+
+function scheduleMapEditorSync() {
+	if (pendingMapEditorSyncTimer) {
+		window.clearTimeout(pendingMapEditorSyncTimer);
+	}
+
+	pendingMapEditorSyncTimer = window.setTimeout(() => {
+		pendingMapEditorSyncTimer = 0;
+		syncMapEditorWindow();
+	}, 120);
 }
 
 function getMapFocusedRowId(datasetId) {
@@ -912,11 +928,6 @@ function scheduleWorkspaceSave() {
 		return;
 	}
 
-	const snapshot = JSON.stringify(serializeWorkspaceState());
-	if (snapshot === workspacePersistence.lastSavedSnapshot) {
-		return;
-	}
-
 	if (workspacePersistence.saveTimer) {
 		window.clearTimeout(workspacePersistence.saveTimer);
 	}
@@ -1227,6 +1238,147 @@ function renderTabs() {
 	}
 }
 
+function renderTableRow(row, headers, selectedColumns, selectedRowIds, geocodeState, pendingRowIds, mapFocusedRowId) {
+	return `
+		<tr class="${selectedRowIds.has(row.__rowId) ? 'selected-row' : ''}${mapFocusedRowId === row.__rowId ? ' map-focused-row' : ''}" data-row-id="${escapeHtml(row.__rowId)}">
+			<td class="row-selector-cell">
+				<button
+					class="row-selector-button ${selectedRowIds.has(row.__rowId) ? 'is-selected' : ''}"
+					type="button"
+					data-row-id="${escapeHtml(row.__rowId)}"
+					aria-label="選取這一列"
+				></button>
+			</td>
+			${headers.map((header) => {
+				const selectedClass = selectedColumns.has(header) ? 'selected-column' : '';
+				const geocodeClass = header === 'candidate_address'
+					? geocodeState.currentRowId === row.__rowId
+						? ' geocode-cell geocode-cell-running'
+						: pendingRowIds.has(row.__rowId)
+							? ' geocode-cell geocode-cell-pending'
+							: ''
+					: '';
+				return `<td class="${selectedClass}${geocodeClass} editable-cell" data-row-id="${escapeHtml(row.__rowId)}" data-column-name="${escapeHtml(header)}">${renderTableCellContent(row, header)}</td>`;
+			}).join('')}
+		</tr>
+	`;
+}
+
+function beginTableCellEdit(cell, dataset) {
+	if (!cell || cell.querySelector('.table-cell-editor')) {
+		return;
+	}
+
+	const row = dataset.rows.find((item) => item.__rowId === cell.dataset.rowId);
+	const columnName = cell.dataset.columnName;
+	if (!row || !columnName) {
+		return;
+	}
+
+	const originalValue = safeString(row[columnName]);
+	cell.classList.add('is-editing');
+	cell.innerHTML = `<input class="table-cell-editor" type="text" value="${escapeHtml(originalValue)}">`;
+	const input = cell.querySelector('.table-cell-editor');
+	if (!input) {
+		return;
+	}
+
+	input.focus();
+	input.select();
+
+	const finishEdit = (shouldSave) => {
+		if (!cell.isConnected) {
+			return;
+		}
+
+		if (shouldSave) {
+			recordDatasetUndoPoint(dataset);
+			row[columnName] = input.value;
+			finalizeDatasetHistory(dataset);
+			render();
+			return;
+		}
+
+		cell.classList.remove('is-editing');
+		cell.innerHTML = renderTableCellContent(row, columnName);
+	};
+
+	input.addEventListener('keydown', (event) => {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			finishEdit(true);
+		}
+
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			finishEdit(false);
+		}
+	});
+
+	input.addEventListener('blur', () => {
+		finishEdit(true);
+	});
+}
+
+function attachTableEventDelegates(tableElement, dataset) {
+	tableElement.addEventListener('change', (event) => {
+		const checkbox = event.target.closest('.column-picker');
+		if (!checkbox) {
+			return;
+		}
+
+		recordDatasetUndoPoint(dataset);
+		toggleCleanupColumn(dataset, checkbox.dataset.columnName);
+		finalizeDatasetHistory(dataset);
+		render();
+	});
+
+	tableElement.addEventListener('click', (event) => {
+		const visibilityButton = event.target.closest('.column-visibility-button');
+		if (visibilityButton) {
+			recordDatasetUndoPoint(dataset);
+			toggleColumnHidden(dataset, visibilityButton.dataset.columnName);
+			finalizeDatasetHistory(dataset);
+			render();
+			return;
+		}
+
+		const sortButton = event.target.closest('.column-sort-button');
+		if (sortButton) {
+			recordDatasetUndoPoint(dataset);
+			toggleSortState(dataset, sortButton.dataset.columnName);
+			finalizeDatasetHistory(dataset);
+			render();
+			return;
+		}
+
+		const invertButton = event.target.closest('.row-selector-invert-button');
+		if (invertButton) {
+			invertRowSelection(dataset);
+			render();
+			return;
+		}
+
+		const rowButton = event.target.closest('.row-selector-button');
+		if (rowButton) {
+			if (rowButton.classList.contains('row-selector-toggle')) {
+				toggleAllRowsSelected(dataset);
+				render();
+				return;
+			}
+
+			updateSelectedRows(dataset, rowButton.dataset.rowId, event);
+			render();
+			return;
+		}
+
+		const cell = event.target.closest('.editable-cell');
+		if (cell) {
+			beginTableCellEdit(cell, dataset);
+		}
+	});
+}
+
 function renderTable(tableElement, dataset) {
 	ensureColumnVisibilityState(dataset);
 	ensureSortState(dataset);
@@ -1236,9 +1388,9 @@ function renderTable(tableElement, dataset) {
 	const selectedRowIds = new Set(dataset.selectedRowIds);
 	const isAllRowsSelected = dataset.rows.length > 0 && dataset.selectedRowIds.length === dataset.rows.length;
 	const geocodeState = ensureGeocodeState(dataset);
-	const pendingRowIds = new Set(geocodeState.pendingRowIds || []);
 	const sortedRows = getSortedRows(dataset);
 	const mapFocusedRowId = getMapFocusedRowId(dataset.id);
+	const renderJobId = ++tableRenderJobSerial;
 
 	tableElement.innerHTML = `
 		<thead>
@@ -1294,137 +1446,37 @@ function renderTable(tableElement, dataset) {
 			}).join('')}
 			</tr>
 		</thead>
-		<tbody>
-			${sortedRows.map((row) => `
-			<tr class="${selectedRowIds.has(row.__rowId) ? 'selected-row' : ''}${mapFocusedRowId === row.__rowId ? ' map-focused-row' : ''}" data-row-id="${escapeHtml(row.__rowId)}">
-					<td class="row-selector-cell">
-						<button
-							class="row-selector-button ${selectedRowIds.has(row.__rowId) ? 'is-selected' : ''}"
-							type="button"
-							data-row-id="${escapeHtml(row.__rowId)}"
-							aria-label="選取這一列"
-						></button>
-					</td>
-					${headers.map((header) => {
-						const selectedClass = selectedColumns.has(header) ? 'selected-column' : '';
-						const geocodeClass = header === 'candidate_address'
-							? geocodeState.currentRowId === row.__rowId
-								? ' geocode-cell geocode-cell-running'
-								: pendingRowIds.has(row.__rowId)
-									? ' geocode-cell geocode-cell-pending'
-									: ''
-							: '';
-						return `<td class="${selectedClass}${geocodeClass} editable-cell" data-row-id="${escapeHtml(row.__rowId)}" data-column-name="${escapeHtml(header)}">${renderTableCellContent(row, header)}</td>`;
-					}).join('')}
-				</tr>
-			`).join('')}
-		</tbody>
+		<tbody></tbody>
 	`;
 
-	for (const checkbox of tableElement.querySelectorAll('.column-picker')) {
-		checkbox.addEventListener('change', () => {
-			recordDatasetUndoPoint(dataset);
-			toggleCleanupColumn(dataset, checkbox.dataset.columnName);
-			finalizeDatasetHistory(dataset);
-			render();
-		});
+	attachTableEventDelegates(tableElement, dataset);
+
+	const tbody = tableElement.querySelector('tbody');
+	if (!tbody) {
+		return;
 	}
 
-	for (const button of tableElement.querySelectorAll('.column-visibility-button')) {
-		button.addEventListener('click', () => {
-			recordDatasetUndoPoint(dataset);
-			toggleColumnHidden(dataset, button.dataset.columnName);
-			finalizeDatasetHistory(dataset);
-			render();
-		});
-	}
+	const chunkSize = 80;
+	const pendingRowIds = new Set(geocodeState.pendingRowIds || []);
+	const renderChunk = (startIndex = 0) => {
+		if (renderJobId !== tableRenderJobSerial || !tbody.isConnected) {
+			return;
+		}
 
-	for (const button of tableElement.querySelectorAll('.column-sort-button')) {
-		button.addEventListener('click', () => {
-			recordDatasetUndoPoint(dataset);
-			toggleSortState(dataset, button.dataset.columnName);
-			finalizeDatasetHistory(dataset);
-			render();
-		});
-	}
+		const nextRows = sortedRows.slice(startIndex, startIndex + chunkSize);
+		tbody.insertAdjacentHTML(
+			'beforeend',
+			nextRows.map((row) => renderTableRow(row, headers, selectedColumns, selectedRowIds, geocodeState, pendingRowIds, mapFocusedRowId)).join('')
+		);
 
-	for (const button of tableElement.querySelectorAll('.row-selector-button')) {
-		button.addEventListener('click', (event) => {
-			if (button.classList.contains('row-selector-toggle')) {
-				toggleAllRowsSelected(dataset);
-				render();
-				return;
-			}
-
-			updateSelectedRows(dataset, button.dataset.rowId, event);
-			render();
-		});
-	}
-
-	for (const button of tableElement.querySelectorAll('.row-selector-invert-button')) {
-		button.addEventListener('click', () => {
-			invertRowSelection(dataset);
-			render();
-		});
-	}
-
-	for (const cell of tableElement.querySelectorAll('.editable-cell')) {
-		cell.addEventListener('click', () => {
-			if (cell.querySelector('.table-cell-editor')) {
-				return;
-			}
-
-			const row = dataset.rows.find((item) => item.__rowId === cell.dataset.rowId);
-			const columnName = cell.dataset.columnName;
-			if (!row || !columnName) {
-				return;
-			}
-
-			const originalValue = safeString(row[columnName]);
-			cell.classList.add('is-editing');
-			cell.innerHTML = `<input class="table-cell-editor" type="text" value="${escapeHtml(originalValue)}">`;
-			const input = cell.querySelector('.table-cell-editor');
-			if (!input) {
-				return;
-			}
-
-			input.focus();
-			input.select();
-
-			const finishEdit = (shouldSave) => {
-				if (!cell.isConnected) {
-					return;
-				}
-
-				if (shouldSave) {
-					recordDatasetUndoPoint(dataset);
-					row[columnName] = input.value;
-					finalizeDatasetHistory(dataset);
-					render();
-					return;
-				}
-
-				cell.classList.remove('is-editing');
-				cell.textContent = originalValue;
-			};
-
-			input.addEventListener('keydown', (event) => {
-				if (event.key === 'Enter') {
-					event.preventDefault();
-					finishEdit(true);
-				}
-
-				if (event.key === 'Escape') {
-					event.preventDefault();
-					finishEdit(false);
-				}
+		if (startIndex + chunkSize < sortedRows.length) {
+			window.requestAnimationFrame(() => {
+				renderChunk(startIndex + chunkSize);
 			});
+		}
+	};
 
-			input.addEventListener('blur', () => {
-				finishEdit(true);
-			});
-		});
-	}
+	renderChunk();
 }
 
 function hydrateColumnSelectors(rootElement, dataset) {
@@ -1668,7 +1720,7 @@ function updateRenderedGeocodeState(dataset, row = null) {
 	if (row) {
 		updateRenderedGeocodeRow(row);
 	}
-	syncMapEditorWindow();
+	scheduleMapEditorSync();
 }
 
 function sleep(ms) {
@@ -2703,6 +2755,10 @@ function renderDatasetPanel(dataset) {
 			`).join('')}
 			<button class="column-visibility-chip" type="button" data-action="show-all-columns">全部顯示</button>
 		`;
+
+	tabContent.innerHTML = '';
+	tabContent.appendChild(panel);
+
 	renderTable(tableElement, dataset);
 	renderSidebar(dataset, tableElement);
 
@@ -2718,9 +2774,6 @@ function renderDatasetPanel(dataset) {
 			render();
 		});
 	}
-
-	tabContent.innerHTML = '';
-	tabContent.appendChild(panel);
 }
 
 function renderActivePanel() {
@@ -2760,7 +2813,9 @@ function render() {
 	captureScrollPositions();
 	blurWorkspaceFocus();
 
-	if (state.datasets.length === 0) {
+	if (workspacePersistence.isHydrating) {
+		datasetCount.textContent = '正在載入工作區...';
+	} else if (state.datasets.length === 0) {
 		datasetCount.textContent = '尚未匯入資料表';
 	} else if (state.activeDatasetId === HOME_TAB_ID) {
 		datasetCount.textContent = `共 ${state.datasets.length} 個資料分頁`;
@@ -2786,7 +2841,7 @@ function render() {
 	renderTabs();
 	renderActivePanel();
 	scheduleScrollRestore();
-	syncMapEditorWindow();
+	scheduleMapEditorSync();
 	scheduleWorkspaceSave();
 }
 
@@ -2912,21 +2967,42 @@ async function hydrateWorkspace() {
 		state.fileViewMode = workspace.fileViewMode;
 		state.activeSidebarTool = workspace.activeSidebarTool;
 		state.cleanupScripts = workspace.cleanupScripts;
-		state.activeDatasetId = workspace.activeDatasetId === HOME_TAB_ID
+		workspacePersistence.pendingStartupDatasetId = workspace.activeDatasetId === HOME_TAB_ID
 			? HOME_TAB_ID
 			: workspace.datasets.some((dataset) => dataset.id === workspace.activeDatasetId)
 				? workspace.activeDatasetId
 				: workspace.datasets.length > 0
 					? workspace.datasets[0].id
 					: HOME_TAB_ID;
+		// Render the lightweight home view first so large tables do not block the first paint.
+		state.activeDatasetId = HOME_TAB_ID;
 	} else {
 		state.cleanupScripts = [];
 		state.activeDatasetId = HOME_TAB_ID;
+		workspacePersistence.pendingStartupDatasetId = HOME_TAB_ID;
 	}
 
 	workspacePersistence.lastSavedSnapshot = JSON.stringify(serializeWorkspaceState());
 	workspacePersistence.isHydrating = false;
 	render();
+
+	if (
+		workspacePersistence.pendingStartupDatasetId
+		&& workspacePersistence.pendingStartupDatasetId !== HOME_TAB_ID
+		&& getDatasetById(workspacePersistence.pendingStartupDatasetId)
+	) {
+		window.setTimeout(() => {
+			if (!workspacePersistence.isHydrating && getDatasetById(workspacePersistence.pendingStartupDatasetId)) {
+				state.activeDatasetId = workspacePersistence.pendingStartupDatasetId;
+				render();
+			}
+			workspacePersistence.pendingStartupDatasetId = '';
+		}, 32);
+		return;
+	}
+
+	workspacePersistence.pendingStartupDatasetId = '';
 }
 
+render();
 hydrateWorkspace();
