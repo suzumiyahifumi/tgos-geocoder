@@ -63,6 +63,7 @@ const homePanelTemplate = document.getElementById('homePanelTemplate');
 const emptyStateTemplate = document.getElementById('emptyStateTemplate');
 const textInputDialogTemplate = document.getElementById('textInputDialogTemplate');
 const confirmDialogTemplate = document.getElementById('confirmDialogTemplate');
+const scopeChoiceDialogTemplate = document.getElementById('scopeChoiceDialogTemplate');
 
 function escapeHtml(value) {
 	return String(value)
@@ -195,6 +196,63 @@ function confirmAction({
 
 		document.body.appendChild(dialogRoot);
 		confirmButton.focus();
+	});
+}
+
+function chooseRowScope({
+	title = '選擇執行範圍',
+	description = '請選擇要套用到所有列，或只套用到已勾選列。',
+	allText = '所有列',
+	selectedText = '已勾選列',
+	cancelText = '取消',
+	hasSelectedRows = false,
+} = {}) {
+	if (!scopeChoiceDialogTemplate?.content?.firstElementChild) {
+		if (!hasSelectedRows) {
+			return Promise.resolve('all');
+		}
+
+		const useSelectedRows = window.confirm(`${description}\n\n按「確定」套用到已勾選列，按「取消」套用到所有列。`);
+		return Promise.resolve(useSelectedRows ? 'selected' : 'all');
+	}
+
+	return new Promise((resolve) => {
+		const dialogRoot = scopeChoiceDialogTemplate.content.firstElementChild.cloneNode(true);
+		const titleElement = dialogRoot.querySelector('.dialog-title');
+		const descriptionElement = dialogRoot.querySelector('.dialog-description');
+		const cancelButton = dialogRoot.querySelector('.dialog-cancel-button');
+		const selectedButton = dialogRoot.querySelector('.dialog-selected-button');
+		const allButton = dialogRoot.querySelector('.dialog-all-button');
+
+		titleElement.textContent = title;
+		descriptionElement.textContent = description;
+		cancelButton.textContent = cancelText;
+		selectedButton.textContent = selectedText;
+		allButton.textContent = allText;
+		selectedButton.disabled = !hasSelectedRows;
+
+		const cleanup = (result) => {
+			dialogRoot.remove();
+			resolve(result);
+		};
+
+		cancelButton.addEventListener('click', () => cleanup(null));
+		selectedButton.addEventListener('click', () => cleanup('selected'));
+		allButton.addEventListener('click', () => cleanup('all'));
+		dialogRoot.addEventListener('click', (event) => {
+			if (event.target === dialogRoot) {
+				cleanup(null);
+			}
+		});
+		dialogRoot.addEventListener('keydown', (event) => {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				cleanup(null);
+			}
+		});
+
+		document.body.appendChild(dialogRoot);
+		(hasSelectedRows ? selectedButton : allButton).focus();
 	});
 }
 
@@ -945,9 +1003,13 @@ function scheduleWorkspaceSave() {
 	}, 500);
 }
 
+function getDisplayedRowIds(dataset) {
+	return getSortedRows(dataset).map((row) => row.__rowId);
+}
+
 function updateSelectedRows(dataset, rowId, event) {
 	ensureRowSelectionState(dataset);
-	const rowIds = dataset.rows.map((row) => row.__rowId);
+	const rowIds = getDisplayedRowIds(dataset);
 	const selectedRowSet = new Set(dataset.selectedRowIds);
 	const isRangeSelect = event.shiftKey && dataset.lastSelectedRowId;
 	const isToggleSelect = event.ctrlKey || event.metaKey;
@@ -1003,23 +1065,23 @@ function getGeocodeTargetRows(dataset, scope, forceReprocess, reprocessUnmatched
 
 function toggleAllRowsSelected(dataset) {
 	ensureRowSelectionState(dataset);
+	const rowIds = getDisplayedRowIds(dataset);
 
-	if (dataset.selectedRowIds.length === dataset.rows.length) {
+	if (dataset.selectedRowIds.length === rowIds.length) {
 		dataset.selectedRowIds = [];
 		dataset.lastSelectedRowId = '';
 		return;
 	}
 
-	dataset.selectedRowIds = dataset.rows.map((row) => row.__rowId);
+	dataset.selectedRowIds = rowIds;
 	dataset.lastSelectedRowId = dataset.selectedRowIds[dataset.selectedRowIds.length - 1] || '';
 }
 
 function invertRowSelection(dataset) {
 	ensureRowSelectionState(dataset);
+	const rowIds = getDisplayedRowIds(dataset);
 	const selectedRowSet = new Set(dataset.selectedRowIds);
-	dataset.selectedRowIds = dataset.rows
-		.map((row) => row.__rowId)
-		.filter((rowId) => !selectedRowSet.has(rowId));
+	dataset.selectedRowIds = rowIds.filter((rowId) => !selectedRowSet.has(rowId));
 	dataset.lastSelectedRowId = dataset.selectedRowIds[dataset.selectedRowIds.length - 1] || '';
 }
 
@@ -1503,8 +1565,18 @@ function toHalfwidth(value) {
 		.replace(/\u3000/g, ' ');
 }
 
-function applyCleanup(dataset, selectedColumns, cleanupOptions, regexRules) {
-	for (const row of dataset.rows) {
+function getRowsByScope(dataset, scope) {
+	ensureRowSelectionState(dataset);
+	if (scope !== 'selected') {
+		return dataset.rows;
+	}
+
+	const selectedRowIds = new Set(dataset.selectedRowIds);
+	return dataset.rows.filter((row) => selectedRowIds.has(row.__rowId));
+}
+
+function applyCleanup(dataset, selectedColumns, cleanupOptions, regexRules, targetRows = dataset.rows) {
+	for (const row of targetRows) {
 		for (const column of selectedColumns) {
 			let value = row[column];
 			if (value === undefined || value === null) {
@@ -1563,12 +1635,12 @@ function toggleCleanupColumn(dataset, columnName) {
 	dataset.cleanupSelectedColumns.push(columnName);
 }
 
-function composeCandidateAddress(dataset) {
+function composeCandidateAddress(dataset, targetRows = dataset.rows) {
 	ensureSystemColumns(dataset);
 	ensureComposeState(dataset);
 	const primaryFormat = dataset.composeFormats[0];
 
-	for (const row of dataset.rows) {
+	for (const row of targetRows) {
 		row.candidate_address = primaryFormat ? buildCandidateAddressFromSegments(row, primaryFormat.segments) : '';
 	}
 }
@@ -2638,8 +2710,24 @@ function renderSidebar(dataset, tableElement) {
 		});
 	}
 
-	applyCleanupButton.addEventListener('click', () => {
+	applyCleanupButton.addEventListener('click', async () => {
 		if (dataset.cleanupSelectedColumns.length === 0) {
+			return;
+		}
+
+		const scope = await chooseRowScope({
+			title: '套用欄位清理',
+			description: '要把目前欄位清理設定套用到所有列，還是只套用到已勾選列？',
+			allText: '所有列',
+			selectedText: '已勾選列',
+			hasSelectedRows: dataset.selectedRowIds.length > 0,
+		});
+		if (!scope) {
+			return;
+		}
+
+		const targetRows = getRowsByScope(dataset, scope);
+		if (targetRows.length === 0) {
 			return;
 		}
 
@@ -2658,19 +2746,35 @@ function renderSidebar(dataset, tableElement) {
 			fullwidthSpace: dataset.cleanupOptions.fullwidthSpace,
 			fullwidthChar: dataset.cleanupOptions.fullwidthChar,
 			removeLinebreak: dataset.cleanupOptions.removeLinebreak,
-		}, dataset.cleanupRegexRules);
+		}, dataset.cleanupRegexRules, targetRows);
 
 		finalizeDatasetHistory(dataset);
 		render();
 	});
 
-	composeAddressButton.addEventListener('click', () => {
+	composeAddressButton.addEventListener('click', async () => {
 		if (dataset.composeFormats[0].segments.length === 0) {
 			return;
 		}
 
+		const scope = await chooseRowScope({
+			title: '建立候選地址',
+			description: '要把目前候選地址格式建立到所有列，還是只建立到已勾選列？',
+			allText: '所有列',
+			selectedText: '已勾選列',
+			hasSelectedRows: dataset.selectedRowIds.length > 0,
+		});
+		if (!scope) {
+			return;
+		}
+
+		const targetRows = getRowsByScope(dataset, scope);
+		if (targetRows.length === 0) {
+			return;
+		}
+
 		recordDatasetUndoPoint(dataset);
-		composeCandidateAddress(dataset);
+		composeCandidateAddress(dataset, targetRows);
 		finalizeDatasetHistory(dataset);
 		render();
 	});
